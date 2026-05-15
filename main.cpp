@@ -237,6 +237,206 @@ namespace
         return true;
     }
 
+    bool run_sql(HANDLE proc, const game::CDatabase& db, const std::string& sql, const std::string& label)
+    {
+        auto r = game::execute_sql(proc, db, sql);
+        if (!r.success)
+        {
+            std::cerr << "  [!] " << label << " FAILED: " << r.error << "\n";
+            return false;
+        }
+        std::cout << "  " << label << " OK\n";
+        return true;
+    }
+
+    void mod_all_cars_autoshow(HANDLE proc, const game::CDatabase& db)
+    {
+        std::cout << "  Applying: All Cars in Autoshow\n\n";
+
+        // Backup autoshow state (skip if backup already exists)
+        auto check = game::execute_sql(proc, db,
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND tbl_name='_backup_AutoshowState'");
+        bool backup_exists = check.success && check.parsed &&
+            !check.parsed->rows.empty() &&
+            std::holds_alternative<int64_t>(check.parsed->rows[0][0]) &&
+            std::get<int64_t>(check.parsed->rows[0][0]) > 0;
+
+        if (!backup_exists)
+        {
+            run_sql(proc, db,
+                "CREATE TABLE _backup_AutoshowState AS SELECT Id, NotAvailableInAutoshow, BaseCost FROM Data_Car",
+                "Backup autoshow state");
+        }
+        else
+        {
+            std::cout << "  Backup table already exists, skipping backup\n";
+        }
+
+        run_sql(proc, db,
+            "UPDATE Data_Car SET NotAvailableInAutoshow = 0",
+            "Set all cars available in autoshow");
+
+        // Recreate Drivable_Data_Car view to include all cars
+        run_sql(proc, db, "DROP VIEW IF EXISTS Drivable_Data_Car", "Drop Drivable_Data_Car view");
+        run_sql(proc, db, "CREATE VIEW Drivable_Data_Car AS SELECT * FROM Data_Car", "Recreate Drivable_Data_Car view");
+
+        // Fill CarBuckets so all cars appear in autoshow listings
+        auto bucket_check = game::execute_sql(proc, db,
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND tbl_name='_backup_CarBuckets'");
+        bool bucket_backup_exists = bucket_check.success && bucket_check.parsed &&
+            !bucket_check.parsed->rows.empty() &&
+            std::holds_alternative<int64_t>(bucket_check.parsed->rows[0][0]) &&
+            std::get<int64_t>(bucket_check.parsed->rows[0][0]) > 0;
+
+        if (!bucket_backup_exists)
+        {
+            run_sql(proc, db,
+                "CREATE TABLE _backup_CarBuckets AS SELECT * FROM CarBuckets",
+                "Backup CarBuckets");
+        }
+
+        run_sql(proc, db,
+            "INSERT OR IGNORE INTO CarBuckets(CarId) SELECT Id FROM Data_Car WHERE Id NOT IN (SELECT CarId FROM CarBuckets)",
+            "Add missing cars to CarBuckets");
+        run_sql(proc, db,
+            "UPDATE CarBuckets SET CarBucket=0, BucketHero=0 WHERE CarBucket IS NULL",
+            "Set default bucket values");
+
+        std::cout << "\n  Done. All cars should now appear in autoshow.\n";
+    }
+
+    void mod_free_cars(HANDLE proc, const game::CDatabase& db)
+    {
+        std::cout << "  Applying: Free Cars\n\n";
+
+        // Backup prices (skip if backup already exists)
+        auto check = game::execute_sql(proc, db,
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND tbl_name='_backup_CarPrices'");
+        bool backup_exists = check.success && check.parsed &&
+            !check.parsed->rows.empty() &&
+            std::holds_alternative<int64_t>(check.parsed->rows[0][0]) &&
+            std::get<int64_t>(check.parsed->rows[0][0]) > 0;
+
+        if (!backup_exists)
+        {
+            run_sql(proc, db,
+                "CREATE TABLE _backup_CarPrices AS SELECT Id, BaseCost FROM Data_Car",
+                "Backup car prices");
+        }
+        else
+        {
+            std::cout << "  Backup table already exists, skipping backup\n";
+        }
+
+        run_sql(proc, db, "UPDATE Data_Car SET BaseCost = 0", "Set all car prices to 0");
+
+        std::cout << "\n  Done. All cars now cost 0 CR.\n";
+    }
+
+    void mod_clear_new_tag(HANDLE proc, const game::CDatabase& db)
+    {
+        std::cout << "  Applying: Clear New Tag\n\n";
+
+        run_sql(proc, db,
+            "UPDATE Profile0_Career_Garage SET HasCurrentOwnerViewedCar = 1",
+            "Mark all garage cars as viewed");
+
+        std::cout << "\n  Done. New tag cleared on all garage cars.\n";
+    }
+
+    void mod_free_upgrades(HANDLE proc, const game::CDatabase& db)
+    {
+        std::cout << "  Applying: Free Upgrades (Performance + Visual)\n\n";
+
+        // All performance upgrade tables
+        const char* perf_tables[] = {
+            "List_UpgradeAntiSwayFront",
+            "List_UpgradeAntiSwayRear",
+            "List_UpgradeBrakes",
+            "List_UpgradeCarBodyChassisStiffness",
+            "List_UpgradeCarBody",
+            "List_UpgradeCarBodyTireAspectRatioFront",
+            "List_UpgradeCarBodyTireAspectRatioRear",
+            "List_UpgradeCarBodyTireWidthFront",
+            "List_UpgradeCarBodyTireWidthRear",
+            "List_UpgradeCarBodyTrackSpacingFront",
+            "List_UpgradeCarBodyTrackSpacingRear",
+            "List_UpgradeCarBodyWeight",
+            "List_UpgradeDrivetrain",
+            "List_UpgradeDrivetrainClutch",
+            "List_UpgradeDrivetrainDifferential",
+            "List_UpgradeDrivetrainDriveline",
+            "List_UpgradeDrivetrainTransmission",
+            "List_UpgradeEngine",
+            "List_UpgradeEngineCamshaft",
+            "List_UpgradeEngineCSC",
+            "List_UpgradeEngineDisplacement",
+            "List_UpgradeEngineDSC",
+            "List_UpgradeEngineExhaust",
+            "List_UpgradeEngineFlywheel",
+            "List_UpgradeEngineFuelSystem",
+            "List_UpgradeEngineIgnition",
+            "List_UpgradeEngineIntake",
+            "List_UpgradeEngineIntercooler",
+            "List_UpgradeEngineManifold",
+            "List_UpgradeEngineOilCooling",
+            "List_UpgradeEnginePistonsCompression",
+            "List_UpgradeEngineRestrictorPlate",
+            "List_UpgradeEngineTurboQuad",
+            "List_UpgradeEngineTurboSingle",
+            "List_UpgradeEngineTurboTwin",
+            "List_UpgradeEngineValves",
+            "List_UpgradeMotor",
+            "List_UpgradeMotorParts",
+            "List_UpgradeRimSizeFront",
+            "List_UpgradeRimSizeRear",
+            "List_UpgradeSpringDamper",
+            "List_UpgradeTireCompound",
+        };
+
+        // Visual upgrade tables
+        const char* visual_tables[] = {
+            "List_UpgradeCarBodyFrontBumper",
+            "List_UpgradeCarBodyHood",
+            "List_UpgradeCarBodyRearBumper",
+            "List_UpgradeCarBodySideSkirt",
+            "List_UpgradeRearWing",
+        };
+
+        int ok = 0, fail = 0;
+
+        for (auto t : perf_tables)
+        {
+            if (run_sql(proc, db, std::string("UPDATE [") + t + "] SET price=0", t))
+                ++ok;
+            else
+                ++fail;
+        }
+
+        for (auto t : visual_tables)
+        {
+            if (run_sql(proc, db, std::string("UPDATE [") + t + "] SET price=0", t))
+                ++ok;
+            else
+                ++fail;
+        }
+
+        // Wheels set to 1 (not 0 — matches FH5 AIO behavior)
+        if (run_sql(proc, db, "UPDATE List_Wheels SET price=1", "List_Wheels (price=1)"))
+            ++ok;
+        else
+            ++fail;
+
+        // Unlock hidden upgrade presets
+        run_sql(proc, db,
+            "UPDATE UpgradePresetPackages SET Purchasable=1 WHERE Purchasable=0",
+            "Unlock hidden upgrade presets");
+
+        std::cout << "\n  Done. " << ok << " tables updated";
+        if (fail > 0) std::cout << ", " << fail << " failed";
+        std::cout << ".\n";
+    }
+
     bool persist_database(HANDLE proc, const game::CDatabase& db, const std::string& input_path)
     {
         if (!std::filesystem::exists(input_path))
@@ -433,6 +633,10 @@ int main()
     std::cout << "Select action:\n";
     std::cout << "  [1] Dump    - Extract game database to fh6_db.sqlite\n";
     std::cout << "  [2] Persist - Load fh6_db.sqlite back into game\n";
+    std::cout << "  [3] All Cars in Autoshow\n";
+    std::cout << "  [4] Free Cars (set all prices to 0)\n";
+    std::cout << "  [5] Clear New Tag on garage cars\n";
+    std::cout << "  [6] Free Upgrades (perf + visual)\n";
     std::cout << "  [0] Exit\n\n";
     std::cout << "> ";
 
@@ -475,6 +679,18 @@ int main()
         }
         break;
     }
+    case 3:
+        mod_all_cars_autoshow(proc->handle, *db);
+        break;
+    case 4:
+        mod_free_cars(proc->handle, *db);
+        break;
+    case 5:
+        mod_clear_new_tag(proc->handle, *db);
+        break;
+    case 6:
+        mod_free_upgrades(proc->handle, *db);
+        break;
     case 0:
         break;
     default:
