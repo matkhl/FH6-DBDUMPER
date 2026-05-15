@@ -437,7 +437,7 @@ namespace
         std::cout << ".\n";
     }
 
-    bool persist_database(HANDLE proc, const game::CDatabase& db, const std::string& input_path)
+    bool persist_database(HANDLE proc, const game::CDatabase& db, const std::string& input_path, int64_t max_rows)
     {
         if (!std::filesystem::exists(input_path))
         {
@@ -453,17 +453,32 @@ namespace
             return false;
         }
 
-        // Get list of tables from local file
-        std::vector<std::string> local_tables;
+        // Get list of tables + row counts from local file
+        struct LocalTable { std::string name; int64_t row_count; };
+        std::vector<LocalTable> local_tables;
         {
             sqlite3_stmt* stmt = nullptr;
             sqlite3_prepare_v2(local_db, "SELECT tbl_name FROM sqlite_master WHERE type='table' ORDER BY tbl_name", -1, &stmt, nullptr);
             while (sqlite3_step(stmt) == SQLITE_ROW)
-                local_tables.push_back(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
+            {
+                std::string name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                // Count rows
+                sqlite3_stmt* cnt = nullptr;
+                std::string sql = "SELECT count(*) FROM [" + name + "]";
+                sqlite3_prepare_v2(local_db, sql.c_str(), -1, &cnt, nullptr);
+                int64_t count = 0;
+                if (sqlite3_step(cnt) == SQLITE_ROW)
+                    count = sqlite3_column_int64(cnt, 0);
+                sqlite3_finalize(cnt);
+                local_tables.push_back({ name, count });
+            }
             sqlite3_finalize(stmt);
         }
 
         std::cout << "  Found " << local_tables.size() << " tables in " << input_path << "\n";
+        if (max_rows > 0)
+            std::cout << "  Skipping tables with more than " << max_rows << " rows\n";
+        std::cout << "\n";
 
         // Get list of tables in game DB
         auto game_tables_result = game::execute_sql(proc, db,
@@ -479,9 +494,11 @@ namespace
         }
 
         size_t total_rows = 0;
+        size_t skipped_large = 0;
         for (size_t t = 0; t < local_tables.size(); ++t)
         {
-            const auto& table = local_tables[t];
+            const auto& table = local_tables[t].name;
+            int64_t row_count = local_tables[t].row_count;
 
             bool exists_in_game = std::find(game_tables.begin(), game_tables.end(), table) != game_tables.end();
             if (!exists_in_game)
@@ -490,7 +507,16 @@ namespace
                 continue;
             }
 
-            std::cout << "  [" << (t + 1) << "/" << local_tables.size() << "] " << table << "... ";
+            if (max_rows > 0 && row_count > max_rows)
+            {
+                std::cout << "  [" << (t + 1) << "/" << local_tables.size() << "] " << table
+                          << "... SKIP (" << row_count << " rows > " << max_rows << " limit)\n";
+                ++skipped_large;
+                continue;
+            }
+
+            std::cout << "  [" << (t + 1) << "/" << local_tables.size() << "] " << table
+                      << " (" << row_count << " rows)... ";
 
             // Delete existing rows
             auto del = game::execute_sql(proc, db, "DELETE FROM [" + table + "]");
@@ -565,7 +591,10 @@ namespace
 
         sqlite3_close(local_db);
 
-        std::cout << "\n  Done. " << total_rows << " total rows injected across " << local_tables.size() << " tables.\n";
+        std::cout << "\n  Done. " << total_rows << " total rows injected.";
+        if (skipped_large > 0)
+            std::cout << " " << skipped_large << " large tables skipped.";
+        std::cout << "\n";
         return true;
     }
 }
@@ -664,14 +693,24 @@ int main()
             std::cerr << "  [!] " << db_path << " not found. Run dump first.\n";
             break;
         }
-        std::cout << "  WARNING: This will overwrite ALL table data in the running game.\n";
+        std::cout << "  WARNING: This will overwrite table data in the running game.\n";
         std::cout << "  Continue? (y/n): ";
         char confirm = 'n';
         std::cin >> confirm;
         if (confirm == 'y' || confirm == 'Y')
         {
+            constexpr int64_t DEFAULT_MAX_ROWS = 500;
+            std::cout << "\n  Max rows per table (tables above this limit are skipped).\n";
+            std::cout << "  Default: " << DEFAULT_MAX_ROWS << ", enter 0 for no limit.\n";
+            std::cout << "  Max rows> ";
+            std::string input;
+            std::cin >> input;
+            int64_t max_rows = DEFAULT_MAX_ROWS;
+            try { max_rows = std::stoll(input); } catch (...) {}
+            if (max_rows < 0) max_rows = 0;
+
             std::cout << "\n  Starting persist...\n\n";
-            persist_database(proc->handle, *db, db_path);
+            persist_database(proc->handle, *db, db_path, max_rows);
         }
         else
         {
