@@ -1,0 +1,15 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+*.vcxproj.filters
+
+# Claude / AI agent
+.claude/
+CLAUDE.md
+
+# Dump output
+fh6_db.sqlite
